@@ -1,59 +1,97 @@
 import "@logseq/libs";
-
-import React from "react";
-import * as ReactDOM from "react-dom/client";
-import App from "./App";
-import "./index.css";
-
-import { logseq as PL } from "../package.json";
-
-// @ts-expect-error
-const css = (t, ...args) => String.raw(t, ...args);
-
-const pluginId = PL.id;
+import { PART_OF_SPEECH_SHORTCUT_MAP, SETTING_SCHEMA } from "./constant";
 
 function main() {
-  console.info(`#${pluginId}: MAIN`);
-  const root = ReactDOM.createRoot(document.getElementById("app")!);
+  logseq.useSettingsSchema(SETTING_SCHEMA);
 
-  root.render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
-  );
-
-  function createModel() {
-    return {
-      show() {
-        logseq.showMainUI();
-      },
-    };
-  }
-
-  logseq.provideModel(createModel());
-  logseq.setMainUIInlineStyle({
-    zIndex: 11,
-  });
-
-  const openIconName = "template-plugin-open";
-
-  logseq.provideStyle(css`
-    .${openIconName} {
-      opacity: 0.55;
-      font-size: 20px;
-      margin-top: 4px;
+  logseq.Editor.registerSlashCommand('Define', async () => {
+    const block = await logseq.Editor.getCurrentBlock();
+    if (!block) {
+      return;
     }
+    let content = await logseq.Editor.getEditingBlockContent();
+    content = content.replaceAll(/[[\] ]/g, "");
 
-    .${openIconName}:hover {
-      opacity: 0.9;
+    const isCN = logseq.settings?.language === 'zh-CN';
+    const showSentence = logseq.settings?.showSentence;
+
+    try {
+      const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${content}`);
+      const basicDefinition = await res.json();
+      let cnDefinition: any = null;
+
+      if (basicDefinition.message) {
+        throw new Error(basicDefinition.message);
+      }
+
+      if (isCN) {
+        const cnRes = await fetch(`https://dict-mobile.iciba.com/interface/index.php?c=word&m=getsuggest&nums=10&is_need_mean=1&word=${content}`);
+        cnDefinition = ((await cnRes.json()).message || []).find((m: any) => m.key === content)
+
+        if(!cnDefinition) {
+          throw new Error('no definition');
+        }
+      }
+
+      const audio = basicDefinition[0].phonetics.find((p: any) => p.audio);
+      const phonetics = {
+        content: "phonetics",
+        children: [
+          {
+            content: audio
+              ? `${audio.text}\n<audio controls><source src="${audio.audio}"></audio>`
+              : basicDefinition[0].phonetics[0].text,
+          }
+        ],
+      }
+      const hasPhonetics = !!phonetics.children[0].content;
+
+      let definitions = [];
+      if(isCN) {
+        definitions = cnDefinition.means.map((m: any) => {
+          // @ts-ignore
+          const partOfSpeech = PART_OF_SPEECH_SHORTCUT_MAP[m.part];
+          const cnMeans = m.means.join(',');
+          const enDifinition = basicDefinition[0].meanings
+            .find((d: any) => d.partOfSpeech === partOfSpeech)
+            .definitions;
+          const cnSentences = enDifinition
+            .find((d: any) => d.example)
+            ?.example || '';
+
+          return {
+            content: partOfSpeech,
+            children: showSentence && cnSentences ? [
+              { content: cnMeans },
+              { content: cnSentences },
+            ] : [
+              { content: cnMeans },
+            ],
+          };
+        });
+      } else {
+        definitions = basicDefinition[0].meanings.map((m: any) => {
+          return {
+            content: m.partOfSpeech,
+            children: m.definitions.map((d: any) => {
+              return {
+                content: d.definition,
+                children: showSentence && d.example ? [{ content: d.example }] : [],
+              };
+            }),
+          };
+        });
+      }
+
+      await logseq.Editor.insertBatchBlock(
+        block.uuid,
+        hasPhonetics ? [phonetics, ...definitions] : definitions,
+        { sibling: false },
+      );
+    } catch (error) {
+      logseq.UI.showMsg(`error defining word ${content}: ${error}`, "error");
+      console.error(error);
     }
-  `);
-
-  logseq.App.registerUIItem("toolbar", {
-    key: openIconName,
-    template: `
-      <div data-on-click="show" class="${openIconName}">⚙️</div>
-    `,
   });
 }
 
